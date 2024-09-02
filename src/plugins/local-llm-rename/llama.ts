@@ -30,7 +30,7 @@ export async function llama(opts: {
   verbose.log("Loading model with options", modelOpts);
   const model = await llama.loadModel(modelOpts);
 
-  const context = await model.createContext({ seed: opts?.seed });
+  const context = await model.createContext({ seed: opts?.seed , sequences: 50 });
 
   return async (systemPrompt, userPrompt, responseGrammar) => {
     const session = new LlamaChatSession({
