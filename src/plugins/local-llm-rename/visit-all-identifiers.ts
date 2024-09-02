@@ -1,6 +1,8 @@
 import { parseAsync, transformFromAstAsync, NodePath } from "@babel/core";
 import * as babelTraverse from "@babel/traverse";
 import { Identifier, isValidIdentifier, Node } from "@babel/types";
+import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
+import os from 'os';
 
 const traverse: typeof babelTraverse.default.default = (
   typeof babelTraverse.default === "function"
@@ -9,6 +11,7 @@ const traverse: typeof babelTraverse.default.default = (
 ) as any;
 
 const CONTEXT_WINDOW_SIZE = 200;
+const BATCH_SIZE = 300;
 
 type Visitor = (name: string, scope: string) => Promise<string>;
 
@@ -22,8 +25,7 @@ export async function visitAllIdentifiers(
     throw new Error("Failed to parse code");
   }
 
-  const visited = new Set<string>();
-  const renames = new Set<string>();
+  const visited = new Map<string, string>();
   const identifiers: NodePath<Identifier>[] = [];
 
   // Collect all identifiers in a single pass
@@ -31,27 +33,16 @@ export async function visitAllIdentifiers(
     BindingIdentifier(path) {
       identifiers.push(path);
     }
-  });
+  }, undefined, { noScope: true });
 
   const numRenamesExpected = identifiers.length;
+  const numCPUs = os.cpus().length;
+  const batchSize = Math.min(BATCH_SIZE, Math.ceil(numRenamesExpected / numCPUs));
 
-  for (let i = 0; i < identifiers.length; i++) {
-    const path = identifiers[i];
-    if (hasVisited(path, visited)) continue;
-
-    const surroundingCode = await scopeToString(path);
-    const renamed = await visitor(path.node.name, surroundingCode);
-
-    let safeRenamed = isValidIdentifier(renamed) ? renamed : `_${renamed}`;
-    while (renames.has(safeRenamed)) {
-      safeRenamed = `_${safeRenamed}`;
-    }
-    renames.add(safeRenamed);
-
-    path.scope.rename(path.node.name, safeRenamed);
-    markVisited(path, safeRenamed, visited);
-
-    onProgress?.((i + 1) / numRenamesExpected);
+  for (let i = 0; i < identifiers.length; i += batchSize) {
+    const batch = identifiers.slice(i, i + batchSize);
+    await processBatch(batch, visitor, visited);
+    onProgress?.((i + batch.length) / numRenamesExpected);
   }
 
   const stringified = await transformFromAstAsync(ast);
@@ -60,6 +51,31 @@ export async function visitAllIdentifiers(
   }
   return stringified.code;
 }
+
+async function processBatch(
+  batch: NodePath<Identifier>[],
+  visitor: Visitor,
+  visited: Map<string, string>
+) {
+  const tasks = batch.map(async (path) => {
+    if (visited.has(path.node.name)) return;
+
+    const surroundingCode = await scopeToString(path);
+    const renamed = await visitor(path.node.name, surroundingCode);
+
+    let safeRenamed = isValidIdentifier(renamed) ? renamed : `_${renamed}`;
+    while (visited.has(safeRenamed)) {
+      safeRenamed = `_${safeRenamed}`;
+    }
+
+    visited.set(path.node.name, safeRenamed);
+    path.scope.rename(path.node.name, safeRenamed);
+  });
+
+  await Promise.all(tasks);
+}
+
+// ... (rest of the code remains the same)
 
 function hasVisited(path: NodePath<Identifier>, visited: Set<string>) {
   return visited.has(path.node.name);
