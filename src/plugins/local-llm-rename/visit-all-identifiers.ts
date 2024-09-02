@@ -11,7 +11,7 @@ const traverse: typeof babelTraverse.default.default = (
 ) as any;
 
 const CONTEXT_WINDOW_SIZE = 200;
-const BATCH_SIZE = 300;
+const BATCH_SIZE = 1000;
 
 type Visitor = (name: string, scope: string) => Promise<string>;
 
