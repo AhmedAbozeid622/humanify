@@ -6,7 +6,7 @@ const traverse: typeof babelTraverse.default.default = (
   typeof babelTraverse.default === "function"
     ? babelTraverse.default
     : babelTraverse.default.default
-) as any; // eslint-disable-line @typescript-eslint/no-explicit-any -- This hack is because pkgroll fucks up the import somehow
+) as any;
 
 const CONTEXT_WINDOW_SIZE = 200;
 
@@ -18,28 +18,29 @@ export async function visitAllIdentifiers(
   onProgress?: (percentageDone: number) => void
 ) {
   const ast = await parseAsync(code);
-  const visited = new Set<string>();
-  const renames = new Set<string>();
   if (!ast) {
     throw new Error("Failed to parse code");
   }
 
-  const numRenamesExpected = countBindingIdentifiers(ast);
-  while (true) {
-    const smallestScope = await findIdentifierWithLargestScopeNotVisited(
-      ast,
-      visited
-    );
-    if (!smallestScope) {
-      break;
-    }
-    const smallestScopeNode = smallestScope.node;
-    if (smallestScopeNode.type !== "Identifier") {
-      throw new Error("No identifiers found");
-    }
+  const visited = new Set<string>();
+  const renames = new Set<string>();
+  const identifiers: NodePath<Identifier>[] = [];
 
-    const surroundingCode = await scopeToString(smallestScope);
-    const renamed = await visitor(smallestScopeNode.name, surroundingCode);
+  // Collect all identifiers in a single pass
+  traverse(ast, {
+    BindingIdentifier(path) {
+      identifiers.push(path);
+    }
+  });
+
+  const numRenamesExpected = identifiers.length;
+
+  for (let i = 0; i < identifiers.length; i++) {
+    const path = identifiers[i];
+    if (hasVisited(path, visited)) continue;
+
+    const surroundingCode = await scopeToString(path);
+    const renamed = await visitor(path.node.name, surroundingCode);
 
     let safeRenamed = isValidIdentifier(renamed) ? renamed : `_${renamed}`;
     while (renames.has(safeRenamed)) {
@@ -47,55 +48,17 @@ export async function visitAllIdentifiers(
     }
     renames.add(safeRenamed);
 
-    smallestScope.scope.rename(smallestScopeNode.name, safeRenamed);
-    markVisited(smallestScope, smallestScopeNode.name, visited);
+    path.scope.rename(path.node.name, safeRenamed);
+    markVisited(path, safeRenamed, visited);
 
-    onProgress?.(visited.size / numRenamesExpected);
+    onProgress?.((i + 1) / numRenamesExpected);
   }
-  onProgress?.(1);
 
   const stringified = await transformFromAstAsync(ast);
   if (!stringified?.code) {
     throw new Error("Failed to stringify code");
   }
-  return stringified?.code;
-}
-
-function findIdentifierWithLargestScopeNotVisited(
-  node: Node,
-  visited: Set<string>
-) {
-  let result: NodePath<Identifier> | undefined;
-  let resultSize = Infinity;
-
-  traverse(node, {
-    BindingIdentifier(path) {
-      if (hasVisited(path, visited)) return;
-
-      if (!result) {
-        result = path;
-        return;
-      }
-
-      const bindingBlock = closestSurroundingContextPath(path).scope.block;
-      const pathSize = bindingBlock.end! - bindingBlock.start!;
-
-      result = resultSize > pathSize ? result : path;
-      resultSize = resultSize > pathSize ? resultSize : pathSize;
-    }
-  });
-
-  return result;
-}
-
-function countBindingIdentifiers(node: Node) {
-  let count = 0;
-  traverse(node, {
-    BindingIdentifier() {
-      count++;
-    }
-  });
-  return count;
+  return stringified.code;
 }
 
 function hasVisited(path: NodePath<Identifier>, visited: Set<string>) {
@@ -143,3 +106,5 @@ function closestSurroundingContextPath(
   )?.scope.path;
   return programOrBindingNode ?? path.scope.path;
 }
+
+
